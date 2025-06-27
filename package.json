@@ -15,6 +15,7 @@
     "@azure/storage-blob": "^12.27.0",
     "dotenv": "^16.6.0",
     "express": "^5.1.0",
+    "joi": "^17.13.3",
     "multer": "^2.0.1",
     "mysql2": "^3.14.1"
   },
