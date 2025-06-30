@@ -132,5 +132,69 @@ module.exports = function(dbPool) {
     }
   });
 
+  // 审核操作接口 
+  router.post('/operate', async (req, res) => {
+    // 校验请求体
+    const operateSchema = Joi.object({
+      application_id: Joi.number().integer().required(),
+      action: Joi.string().valid('APPROVED', 'REJECTED').required(), // 操作必须是 'APPROVED' 或 'REJECTED'
+      comments: Joi.string().allow('').optional() // 备注是可选的
+    });
+
+    const { error, value } = operateSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ success: false, message: `输入数据无效: ${error.details[0].message}` });
+    }
+    
+    const { application_id, action, comments } = value;
+    // 在真实的系统中，操作员ID应该从登录态（如JWT Token）中获取，此处暂时硬编码
+    const operator_id = 'auditor_01'; 
+    let connection;
+
+    try {
+      connection = await dbPool.getConnection();
+      await connection.beginTransaction();
+
+      // 使用 FOR UPDATE 对该行加锁，防止多个审核员同时操作同一条申请，避免竞态条件
+      const [applications] = await connection.query('SELECT status FROM application_info WHERE id = ? FOR UPDATE;', [application_id]);
+      if (applications.length === 0) {
+        await connection.rollback();
+        return res.status(404).json({ success: false, message: '申请记录不存在。' });
+      }
+
+      // 只有处于“待处理”状态的申请才能被审核
+      const currentStatus = applications[0].status;
+      if (currentStatus !== 'PENDING') {
+        await connection.rollback();
+        return res.status(403).json({ success: false, message: `操作被拒绝：只有“待处理”的申请才能被审核。当前状态为“${currentStatus}”。` });
+      }
+      
+      // 如果是“驳回”操作，则备注(comments)必须填写
+      if (action === 'REJECTED' && (!comments || comments.trim() === '')) {
+        await connection.rollback();
+        return res.status(400).json({ success: false, message: '输入数据无效: 驳回申请时必须提供备注原因。' });
+      }
+
+      // 更新申请表的状态
+      const updateStatusSQL = "UPDATE application_info SET status = ?, updated_at = NOW() WHERE id = ?";
+      await connection.query(updateStatusSQL, [action, application_id]);
+      
+      // 在审计日志表中记录本次操作
+      const logActionSQL = 'INSERT INTO audit_log (application_id, operator_id, action, remarks) VALUES (?, ?, ?, ?)';
+      await connection.query(logActionSQL, [application_id, operator_id, action, comments || null]);
+
+      await connection.commit();
+
+      res.status(200).json({ success: true, message: `申请 #${application_id} 已成功 ${action === 'APPROVED' ? '通过' : '驳回'}。` });
+
+    } catch (dbError) {
+      if (connection) await connection.rollback();
+      console.error('审核操作时发生数据库错误:', dbError);
+      res.status(500).json({ success: false, message: '服务器内部错误，操作失败。' });
+    } finally {
+      if (connection) connection.release();
+    }
+  });
+
   return router;
 };
