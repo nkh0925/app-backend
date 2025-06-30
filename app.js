@@ -1,4 +1,3 @@
-//导入所需模块
 const express = require('express');
 const mysql = require('mysql2/promise'); 
 const multer = require('multer');
@@ -82,23 +81,23 @@ app.post('/api/application/submit', async (req, res) => {
   });
 
   // 使用 Joi 进行数据校验
-const { error, value } = applicationSchema.validate(req.body);
-if (error) {
-  console.error("完整校验错误详情：", error.details);
-  const message = error.details[0].message;
-  console.error("校验失败详情：", {
-    error: error.details,
-    receivedData: req.body
-  });
-  return res.status(400).json({
-    success: false,
-    message: `输入数据无效: ${message}`
-  });
+    const { error, value } = applicationSchema.validate(req.body);
+  if (error) {
+    console.error("完整校验错误详情：", error.details);
+    const message = error.details[0].message;
+    console.error("校验失败详情：", {
+        error: error.details,
+        receivedData: req.body
+    });
+    return res.status(400).json({
+        success: false,
+        message: `输入数据无效: ${message}`
+    });
 } else if (!value) {
-  return res.status(400).json({
-    success: false,
-    message: '未知校验错误，输入的数据可能不完整。'
-  });
+     return res.status(400).json({
+        success: false,
+        message: '未知校验错误，输入的数据可能不完整。'
+    });
 }  const {
     name,
     gender,
