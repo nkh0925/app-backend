@@ -208,6 +208,160 @@ module.exports = function(dbPool) {
     }
   });
 
+  router.post('/application/update', async (req, res) => {
+    // 1. 定义可修改字段的校验规则
+    const updateSchema = Joi.object({
+      application_id: Joi.number().integer().required(),
+      name: Joi.string().min(2).max(50).required(),
+      gender: Joi.string().valid('男', '女').required(),
+      address: Joi.string().min(5).max(255).required(),
+      id_front_photo_url: Joi.string().uri().required(),
+      id_back_photo_url: Joi.string().uri().required(),
+    });
+
+    const { error, value } = updateSchema.validate(req.body);
+
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: `输入数据无效: ${error.details[0].message}`
+      });
+    }
+    
+    const { application_id, name, gender, address, id_front_photo_url, id_back_photo_url } = value;
+    let connection;
+
+    try {
+      connection = await dbPool.getConnection();
+      await connection.beginTransaction();
+
+      // 检查申请的当前状态 (并加锁防止并发操作)
+      const [applications] = await connection.query(
+        'SELECT status FROM application_info WHERE id = ? FOR UPDATE;',
+        [application_id]
+      );
+
+      if (applications.length === 0) {
+        await connection.rollback();
+        return res.status(404).json({ success: false, message: '申请记录不存在。' });
+      }
+
+      // 只有被驳回 (REJECTED) 的申请才能修改
+      const currentStatus = applications[0].status;
+      if (currentStatus !== 'REJECTED') {
+        await connection.rollback();
+        const message = `操作被拒绝：只有状态为“已驳回”的申请才能被修改。当前状态为“${currentStatus}”。`;
+        return res.status(403).json({ success: false, message });
+      }
+
+      // 更新申请信息，并将状态重置为 PENDING
+      const updateSQL = `
+        UPDATE application_info 
+        SET name = ?, gender = ?, address = ?, id_front_photo_url = ?, id_back_photo_url = ?, status = 'PENDING', updated_at = NOW()
+        WHERE id = ?;
+      `;
+      await connection.query(updateSQL, [name, gender, address, id_front_photo_url, id_back_photo_url, application_id]);
+
+      // 写入审计日志
+      const insertLogSQL = `
+        INSERT INTO audit_log (application_id, operator_id, action, remarks) 
+        VALUES (?, ?, ?, ?);
+      `;
+      await connection.query(insertLogSQL, [application_id, 'customer', 'RESUBMIT', '客户修改后重新提交']);
+
+      await connection.commit();
+
+      res.status(200).json({
+        success: true,
+        message: '您的申请已成功更新并重新提交，请等待审核。'
+      });
+
+    } catch (dbError) {
+      if (connection) await connection.rollback();
+      console.error('更新申请时发生数据库错误:', dbError);
+      res.status(500).json({ success: false, message: '服务器内部错误，操作失败。' });
+    } finally {
+      if (connection) connection.release();
+    }
+  });
+
+    router.post('/application/update', async (req, res) => {
+    // 1. 定义可修改字段的校验规则
+    const updateSchema = Joi.object({
+      application_id: Joi.number().integer().required(),
+      name: Joi.string().min(2).max(50).required(),
+      gender: Joi.string().valid('男', '女').required(),
+      address: Joi.string().min(5).max(255).required(),
+      id_front_photo_url: Joi.string().uri().required(),
+      id_back_photo_url: Joi.string().uri().required(),
+    });
+
+    const { error, value } = updateSchema.validate(req.body);
+
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: `输入数据无效: ${error.details[0].message}`
+      });
+    }
+    
+    const { application_id, name, gender, address, id_front_photo_url, id_back_photo_url } = value;
+    let connection;
+
+    try {
+      connection = await dbPool.getConnection();
+      await connection.beginTransaction();
+
+      // 2. 检查申请的当前状态 (并加锁防止并发操作)
+      const [applications] = await connection.query(
+        'SELECT status FROM application_info WHERE id = ? FOR UPDATE;',
+        [application_id]
+      );
+
+      if (applications.length === 0) {
+        await connection.rollback();
+        return res.status(404).json({ success: false, message: '申请记录不存在。' });
+      }
+
+      // 3. 只有被驳回 (REJECTED) 的申请才能修改
+      const currentStatus = applications[0].status;
+      if (currentStatus !== 'REJECTED') {
+        await connection.rollback();
+        const message = `操作被拒绝：只有状态为“已驳回”的申请才能被修改。当前状态为“${currentStatus}”。`;
+        return res.status(403).json({ success: false, message });
+      }
+
+      // 4. 更新申请信息，并将状态重置为 PENDING
+      const updateSQL = `
+        UPDATE application_info 
+        SET name = ?, gender = ?, address = ?, id_front_photo_url = ?, id_back_photo_url = ?, status = 'PENDING', updated_at = NOW()
+        WHERE id = ?;
+      `;
+      await connection.query(updateSQL, [name, gender, address, id_front_photo_url, id_back_photo_url, application_id]);
+
+      // 5. 写入审计日志
+      const insertLogSQL = `
+        INSERT INTO audit_log (application_id, operator_id, action, remarks) 
+        VALUES (?, ?, ?, ?);
+      `;
+      await connection.query(insertLogSQL, [application_id, 'customer', 'RESUBMIT', '客户修改后重新提交']);
+
+      await connection.commit();
+
+      res.status(200).json({
+        success: true,
+        message: '您的申请已成功更新并重新提交，请等待审核。'
+      });
+
+    } catch (dbError) {
+      if (connection) await connection.rollback();
+      console.error('更新申请时发生数据库错误:', dbError);
+      res.status(500).json({ success: false, message: '服务器内部错误，操作失败。' });
+    } finally {
+      if (connection) connection.release();
+    }
+  });
+
   // 文件上传接口
   router.post('/file/upload', upload.single('file'), async (req, res) => {
     try {
