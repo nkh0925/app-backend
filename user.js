@@ -141,7 +141,7 @@ module.exports = function(dbPool) {
       }
     }
   });
-
+// 查询申请接口
    router.post('/application/query', async (req, res) => {
     // 定义对 URL 查询参数的校验规则
     const querySchema = Joi.object({
@@ -208,6 +208,7 @@ module.exports = function(dbPool) {
     }
   });
 
+//   修改申请接口
   router.post('/application/update', async (req, res) => {
     // 1. 定义可修改字段的校验规则
     const updateSchema = Joi.object({
@@ -285,18 +286,17 @@ module.exports = function(dbPool) {
     }
   });
 
-    router.post('/application/update', async (req, res) => {
-    // 1. 定义可修改字段的校验规则
-    const updateSchema = Joi.object({
-      application_id: Joi.number().integer().required(),
-      name: Joi.string().min(2).max(50).required(),
-      gender: Joi.string().valid('男', '女').required(),
-      address: Joi.string().min(5).max(255).required(),
-      id_front_photo_url: Joi.string().uri().required(),
-      id_back_photo_url: Joi.string().uri().required(),
+//   取消申请接口
+  router.post('/application/cancel', async (req, res) => {
+    //校验请求体中的 application_id
+    const cancelSchema = Joi.object({
+      application_id: Joi.number().integer().required().messages({
+        'any.required': '申请ID是必填项。',
+        'number.base': '申请ID必须是数字。'
+      })
     });
 
-    const { error, value } = updateSchema.validate(req.body);
+    const { error, value } = cancelSchema.validate(req.body);
 
     if (error) {
       return res.status(400).json({
@@ -304,15 +304,15 @@ module.exports = function(dbPool) {
         message: `输入数据无效: ${error.details[0].message}`
       });
     }
-    
-    const { application_id, name, gender, address, id_front_photo_url, id_back_photo_url } = value;
+
+    const { application_id } = value;
     let connection;
 
     try {
       connection = await dbPool.getConnection();
       await connection.beginTransaction();
 
-      // 2. 检查申请的当前状态 (并加锁防止并发操作)
+      // 检查申请的当前状态 (并加锁)
       const [applications] = await connection.query(
         'SELECT status FROM application_info WHERE id = ? FOR UPDATE;',
         [application_id]
@@ -323,39 +323,37 @@ module.exports = function(dbPool) {
         return res.status(404).json({ success: false, message: '申请记录不存在。' });
       }
 
-      // 3. 只有被驳回 (REJECTED) 的申请才能修改
+      // 只有 PENDING 状态的申请可以被客户取消
       const currentStatus = applications[0].status;
-      if (currentStatus !== 'REJECTED') {
+      if (currentStatus !== 'PENDING') {
         await connection.rollback();
-        const message = `操作被拒绝：只有状态为“已驳回”的申请才能被修改。当前状态为“${currentStatus}”。`;
+        const message = `操作被拒绝：只有状态为“待处理”的申请才能被取消。当前状态为“${currentStatus}”。`;
         return res.status(403).json({ success: false, message });
       }
 
-      // 4. 更新申请信息，并将状态重置为 PENDING
-      const updateSQL = `
-        UPDATE application_info 
-        SET name = ?, gender = ?, address = ?, id_front_photo_url = ?, id_back_photo_url = ?, status = 'PENDING', updated_at = NOW()
-        WHERE id = ?;
-      `;
-      await connection.query(updateSQL, [name, gender, address, id_front_photo_url, id_back_photo_url, application_id]);
+      // 更新状态为 CANCELLED
+      await connection.query(
+        "UPDATE application_info SET status = 'CANCELLED', updated_at = NOW() WHERE id = ?",
+        [application_id]
+      );
 
-      // 5. 写入审计日志
+      // 写入审计日志
       const insertLogSQL = `
         INSERT INTO audit_log (application_id, operator_id, action, remarks) 
         VALUES (?, ?, ?, ?);
       `;
-      await connection.query(insertLogSQL, [application_id, 'customer', 'RESUBMIT', '客户修改后重新提交']);
+      await connection.query(insertLogSQL, [application_id, 'customer', 'CANCEL', '客户主动取消申请']);
 
       await connection.commit();
 
       res.status(200).json({
         success: true,
-        message: '您的申请已成功更新并重新提交，请等待审核。'
+        message: '您的申请已成功取消。'
       });
 
     } catch (dbError) {
       if (connection) await connection.rollback();
-      console.error('更新申请时发生数据库错误:', dbError);
+      console.error('取消申请时发生数据库错误:', dbError);
       res.status(500).json({ success: false, message: '服务器内部错误，操作失败。' });
     } finally {
       if (connection) connection.release();
