@@ -39,6 +39,10 @@ app.get('/api/test-db', async (req, res) => {
 const userRoutes = require('./user')(dbPool);
 app.use('/api', userRoutes);
 
+// 导入审核路由
+const auditRoutes = require('./audit')(dbPool);
+app.use('/api/audit', auditRoutes);
+
 // 启动服务器
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, async () => {
