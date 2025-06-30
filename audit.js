@@ -84,5 +84,53 @@ module.exports = function(dbPool) {
     }
   });
 
+  // 申请详情接口
+  router.post('/detail', async (req, res) => {
+    // 校验URL查询参数中的 application_id
+    const detailSchema = Joi.object({
+      application_id: Joi.number().integer().required()
+    });
+
+    const { error, value } = detailSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ success: false, message: `查询参数无效: ${error.details[0].message}` });
+    }
+
+    const { application_id } = value;
+    let connection;
+
+    try {
+      connection = await dbPool.getConnection();
+
+      // 使用 Promise.all 并行查询申请详情和审核历史，提高效率
+      const applicationQuery = 'SELECT * FROM application_info WHERE id = ?';
+      const historyQuery = 'SELECT * FROM audit_log WHERE application_id = ? ORDER BY created_at DESC';
+
+      const [[applications], [history]] = await Promise.all([
+        connection.query(applicationQuery, [application_id]),
+        connection.query(historyQuery, [application_id])
+      ]);
+
+      if (applications.length === 0) {
+        return res.status(404).json({ success: false, message: '申请记录不存在。' });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: '成功获取申请详情。',
+        data: {
+          details: applications[0], // 申请的完整信息
+          history: history          // 相关的审核历史记录数组
+        }
+      });
+
+    } catch (dbError) {
+      console.error('获取申请详情时发生数据库错误:', dbError);
+      res.status(500).json({ success: false, message: '服务器内部错误，获取详情失败。' });
+    } finally {
+      if (connection) connection.release();
+    }
+  });
+
   return router;
 };
