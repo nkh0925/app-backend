@@ -1,0 +1,255 @@
+const express = require('express');
+const router = express.Router();
+const Joi = require('joi');
+const multer = require('multer');
+const { blobServiceClient } = require('./azure-service');
+const { BlobSASPermissions, generateBlobSASQueryParameters, SASProtocol } = require('@azure/storage-blob');
+
+// 配置 Multer
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 限制文件大小为 5MB
+});
+
+module.exports = function(dbPool) {
+  // 提交申请接口
+  router.post('/application/submit', async (req, res) => {
+    console.log("服务器收到的原始请求体 (req.body):", req.body);
+
+    //定义数据校验规则
+    const applicationSchema = Joi.object({
+      name: Joi.string().min(2).max(50).required(),
+      gender: Joi.string().valid('男', '女').required(),
+      id_type: Joi.string().valid('居民身份证', '港澳台居民居住证').required(),
+      id_number: Joi.string().when('id_type', {
+        switch: [
+          { 
+            is: '居民身份证', 
+            then: Joi.string().pattern(/^[1-9]\d{5}(18|19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{3}(\d|X|x)$/).required().messages({
+              'string.pattern.base': '无效的居民身份证号码格式。'
+            })
+          },
+          { 
+            is: '港澳台居民居住证', 
+            then: Joi.string().pattern(/^8[123]0000(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dX]$/).required().messages({
+              'string.pattern.base': '无效的港澳台居民居住证号码格式。'
+            })
+          }
+        ]
+      }),
+      phone_number: Joi.string().pattern(/^1[3-9]\d{9}$/).required().messages({
+        'string.pattern.base': '无效的手机号码格式。'
+      }),
+      address: Joi.string().min(5).max(255).required(),
+      id_front_photo_url: Joi.string().uri().required(),
+      id_back_photo_url: Joi.string().uri().required(),
+    });
+
+    // 使用 Joi 进行数据校验
+    const { error, value } = applicationSchema.validate(req.body);
+    if (error) {
+      console.error("完整校验错误详情：", error.details);
+      const message = error.details[0].message;
+      console.error("校验失败详情：", {
+        error: error.details,
+        receivedData: req.body
+      });
+      return res.status(400).json({
+        success: false,
+        message: `输入数据无效: ${message}`
+      });
+    } else if (!value) {
+      return res.status(400).json({
+        success: false,
+        message: '未知校验错误，输入的数据可能不完整。'
+      });
+    }
+    
+    const {
+      name,
+      gender,
+      id_type,
+      id_number,
+      phone_number,
+      address,
+      id_front_photo_url,
+      id_back_photo_url
+    } = value;
+    
+    let connection;
+
+    try {
+      connection = await dbPool.getConnection();
+      await connection.beginTransaction();
+
+      const insertApplicationSQL = `
+        INSERT INTO application_info 
+        (name, gender, id_type, id_number, phone_number, address, id_front_photo_url, id_back_photo_url) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+      `;
+      const [applicationResult] = await connection.query(insertApplicationSQL, [
+        name,
+        gender,
+        id_type,
+        id_number,
+        phone_number,
+        address,
+        id_front_photo_url,
+        id_back_photo_url
+      ]);
+      
+      const newApplicationId = applicationResult.insertId;
+
+      const insertLogSQL = `
+        INSERT INTO audit_log (application_id, operator_id, action, remarks) 
+        VALUES (?, ?, ?, ?);
+      `;
+      await connection.query(insertLogSQL, [newApplicationId, 'system', 'SUBMIT', '客户线上提交申请']);
+
+      await connection.commit();
+
+      res.status(201).json({
+        success: true,
+        message: '申请提交成功！',
+        data: {
+          applicationId: newApplicationId
+        }
+      });
+
+    } catch (dbError) {
+      if (connection) {
+        await connection.rollback();
+      }
+      
+      if (dbError.code === 'ER_DUP_ENTRY') {
+        return res.status(409).json({
+          success: false,
+          message: '申请提交失败，该证件号码已经提交过申请。'
+        });
+      }
+
+      console.error('申请提交时发生数据库错误:', dbError);
+      res.status(500).json({
+        success: false,
+        message: '服务器内部错误，请稍后再试。',
+        error: dbError.message
+      });
+
+    } finally {
+      if (connection) {
+        connection.release();
+      }
+    }
+  });
+
+   router.post('/application/query', async (req, res) => {
+    // 定义对 URL 查询参数的校验规则
+    const querySchema = Joi.object({
+      id_number: Joi.string().required().messages({
+        'any.required': '证件号码是必填项。'
+      }),
+      phone_number: Joi.string().pattern(/^1[3-9]\d{9}$/).required().messages({
+        'any.required': '手机号码是必填项。',
+        'string.pattern.base': '无效的手机号码格式。'
+      })
+    });
+
+    // 校验来自 req.query 的参数
+    const { error, value } = querySchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: `查询参数无效: ${error.details[0].message}`
+      });
+    }
+
+    const { id_number, phone_number } = value;
+    let connection;
+
+    try {
+      connection = await dbPool.getConnection();
+
+      // 查询数据库中与凭证匹配的最新一条申请
+      const findApplicationSQL = `
+        SELECT id, name, status, created_at, updated_at 
+        FROM application_info 
+        WHERE id_number = ? AND phone_number = ?
+        ORDER BY id DESC 
+        LIMIT 1;
+      `;
+
+      const [applications] = await connection.query(findApplicationSQL, [id_number, phone_number]);
+
+      // 处理查询结果
+      if (applications.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: '未找到匹配的申请记录，请检查您的证件号码和手机号码。'
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: '成功查询到申请状态。',
+        data: applications[0] // 返回找到的唯一记录
+      });
+
+    } catch (dbError) {
+      console.error('查询申请进度时发生数据库错误:', dbError);
+      res.status(500).json({
+        success: false,
+        message: '服务器内部错误，查询失败。',
+        error: dbError.message
+      });
+    } finally {
+      if (connection) {
+        connection.release();
+      }
+    }
+  });
+
+  // 文件上传接口
+  router.post('/file/upload', upload.single('file'), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: '没有提供文件用于上传。' });
+      }
+
+      const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
+      const containerClient = blobServiceClient.getContainerClient(containerName);
+      
+      const blobName = `${Date.now()}-${req.file.originalname}`;
+      const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+
+      await blockBlobClient.uploadData(req.file.buffer, {
+        blobHTTPHeaders: { blobContentType: req.file.mimetype }
+      });
+
+      const sasOptions = {
+        containerName: containerName,
+        blobName: blobName,
+        startsOn: new Date(),
+        expiresOn: new Date(new Date().valueOf() + 3600 * 1000),
+        permissions: BlobSASPermissions.parse("r"),
+        protocol: SASProtocol.Https
+      };
+
+      const sasToken = generateBlobSASQueryParameters(sasOptions, blobServiceClient.credential).toString();
+      const sasUrl = `${blockBlobClient.url}?${sasToken}`;
+
+      res.status(200).json({
+        success: true,
+        message: '文件上传成功！',
+        data: {
+          url: sasUrl 
+        }
+      });
+
+    } catch (error) {
+      console.error('文件上传到Azure时发生错误:', error);
+      res.status(500).json({ success: false, message: '服务器内部错误，文件上传失败。', error: error.message });
+    }
+  });
+
+  return router;
+};
