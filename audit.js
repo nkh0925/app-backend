@@ -176,8 +176,8 @@ module.exports = function(dbPool) {
       }
 
       // 更新申请表的状态
-      const updateStatusSQL = "UPDATE application_info SET status = ?, updated_at = NOW() WHERE id = ?";
-      await connection.query(updateStatusSQL, [action, application_id]);
+      const updateStatusSQL = "UPDATE application_info SET status = ?, comments = ?, updated_at = NOW() WHERE id = ?";
+      await connection.query(updateStatusSQL, [action, comments||null, application_id]);
       
       // 在审计日志表中记录本次操作
       const logActionSQL = 'INSERT INTO audit_log (application_id, operator_id, action, remarks) VALUES (?, ?, ?, ?)';

@@ -35,8 +35,8 @@ app.get('/api/test-db', async (req, res) => {
   }
 });
 
-// 导入用户路由
-const userRoutes = require('./user')(dbPool);
+// 导入客户端路由
+const userRoutes = require('./client')(dbPool);
 app.use('/api', userRoutes);
 
 // 导入审核路由

@@ -141,6 +141,7 @@ module.exports = function(dbPool) {
       }
     }
   });
+
 // 查询申请接口
    router.post('/application/query', async (req, res) => {
     // 定义对 URL 查询参数的校验规则
@@ -208,9 +209,9 @@ module.exports = function(dbPool) {
     }
   });
 
-//   修改申请接口
+// 修改申请接口
   router.post('/application/update', async (req, res) => {
-    // 1. 定义可修改字段的校验规则
+    // 定义可修改字段的校验规则
     const updateSchema = Joi.object({
       application_id: Joi.number().integer().required(),
       name: Joi.string().min(2).max(50).required(),
