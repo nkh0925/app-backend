@@ -153,7 +153,7 @@ module.exports = function(dbPool) {
     }
     
     const { application_id, action, comments } = value;
-    const operator_id = req.user_id; 
+    const operator_id = req.user.user_id; 
     let connection;
 
     try {
