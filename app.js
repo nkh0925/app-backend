@@ -35,11 +35,16 @@ app.get('/api/test-db', async (req, res) => {
   }
 });
 
-// 导入客户端路由
-const userRoutes = require('./client')(dbPool);
-app.use('/api', userRoutes);
 
-// 导入审核路由
+// 认证路由
+const authRoutes = require('./auth')(dbPool);
+app.use('/api/auth', authRoutes);
+
+// 客户端路由
+const clientRoutes = require('./client')(dbPool);
+app.use('/api', clientRoutes);
+
+// 审核路由
 const auditRoutes = require('./audit')(dbPool);
 app.use('/api/audit', auditRoutes);
 

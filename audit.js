@@ -2,8 +2,12 @@
 const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
-
+const { authenticate, authorize } = require('./authMiddleware');
 module.exports = function(dbPool) {
+
+  // 对所有审核接口，要求先登录(authenticate)，然后检查角色(authorize)
+  router.use(authenticate);
+  router.use(authorize(['auditor', 'admin']));
 
   // 申请列表接口
   router.get('/list', async (req, res) => {
@@ -11,7 +15,7 @@ module.exports = function(dbPool) {
     const listSchema = Joi.object({
       name: Joi.string().allow('').optional(),        // 允许姓名为空字符串或未定义
       id_number: Joi.string().allow('').optional(),   // 允许证件号为空字符串或未定义
-      status: Joi.string().valid('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED').allow('').optional(), // 状态必须是这三者之一，也允许为空
+      status: Joi.string().valid('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED').allow('').optional(), // 状态必须是这四者之一，也允许为空
       page: Joi.number().integer().min(1).default(1),      
       pageSize: Joi.number().integer().min(1).default(10) 
     });
@@ -101,9 +105,13 @@ module.exports = function(dbPool) {
 
     try {
       connection = await dbPool.getConnection();
-
-      // 使用 Promise.all 并行查询申请详情和审核历史，提高效率
-      const applicationQuery = 'SELECT * FROM application_info WHERE id = ?';
+      // 使用JOIN查询，同时获取申请信息和申请人信息
+      const applicationQuery = `
+        SELECT a.*, u.name as user_name, u.phone_number as user_phone
+        FROM application_info a
+        LEFT JOIN users u ON a.user_id = u.id
+        WHERE a.id = ?
+      `;
       const historyQuery = 'SELECT * FROM audit_log WHERE application_id = ? ORDER BY created_at DESC';
 
       const [[applications], [history]] = await Promise.all([
@@ -114,16 +122,14 @@ module.exports = function(dbPool) {
       if (applications.length === 0) {
         return res.status(404).json({ success: false, message: '申请记录不存在。' });
       }
-
       res.status(200).json({
         success: true,
         message: '成功获取申请详情。',
         data: {
-          details: applications[0], // 申请的完整信息
-          history: history          // 相关的审核历史记录数组
+          details: applications[0],
+          history: history
         }
       });
-
     } catch (dbError) {
       console.error('获取申请详情时发生数据库错误:', dbError);
       res.status(500).json({ success: false, message: '服务器内部错误，获取详情失败。' });
@@ -147,8 +153,7 @@ module.exports = function(dbPool) {
     }
     
     const { application_id, action, comments } = value;
-    // 在真实的系统中，操作员ID应该从登录态（如JWT Token）中获取，此处暂时硬编码
-    const operator_id = 'auditor_01'; 
+    const operator_id = req.user_id; 
     let connection;
 
     try {
@@ -180,7 +185,7 @@ module.exports = function(dbPool) {
       await connection.query(updateStatusSQL, [action, comments||null, application_id]);
       
       // 在审计日志表中记录本次操作
-      const logActionSQL = 'INSERT INTO audit_log (application_id, operator_id, action, remarks) VALUES (?, ?, ?, ?)';
+      const logActionSQL = 'INSERT INTO audit_log (application_id, user_id, action, remarks) VALUES (?, ?, ?, ?)';
       await connection.query(logActionSQL, [application_id, operator_id, action, comments || null]);
 
       await connection.commit();
