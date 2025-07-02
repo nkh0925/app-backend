@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
+const path = require('path');
 const Joi = require('joi');
 const multer = require('multer');
 const { authenticate } = require('./authMiddleware');
 const { blobServiceClient } = require('./azure-service');
-const { BlobSASPermissions, generateBlobSASQueryParameters, SASProtocol } = require('@azure/storage-blob');
 
 // 配置 Multer
 const upload = multer({
@@ -19,10 +19,37 @@ module.exports = function(dbPool) {
   router.post('/application/submit', async (req, res) => {
     console.log("服务器收到的原始请求体 (req.body):", req.body);
 
+    // 校验年龄
+    const isAge60OrOver = (value, helpers) => {
+        const birthDate = new Date(value);
+        const today = new Date();
+        let age = today.getFullYear() - birthDate.getFullYear();
+        const monthDifference = today.getMonth() - birthDate.getMonth();
+        if (monthDifference < 0 || (monthDifference === 0 && today.getDate() < birthDate.getDate())) {
+            age--;
+        }
+
+        if (age < 60) {
+            // 如果年龄小于60，返回一个自定义的错误信息
+            return helpers.message('不符合安心卡申领条件：申请人必须年满60周岁');
+        }
+        return value; // 校验通过
+    };
+
     //定义数据校验规则
     const applicationSchema = Joi.object({
-      id_type: Joi.string().valid('居民身份证', '港澳台居民居住证').required(),
-      id_number: Joi.string().when('id_type', {
+      name: Joi.string().required().messages({'any.required': '申请人姓名不能为空'}),
+      gender: Joi.string().valid('男', '女').required().messages({'any.required': '请选择性别'}),
+      phone_number: Joi.string().pattern(/^[1-9]\d{10}$/).required().messages({
+          'string.pattern.base': '无效的手机号码格式。',
+          'any.required': '手机号码不能为空'
+      }),
+      address: Joi.string().required().messages({'any.required': '联系地址不能为空'}),  
+      birthday: Joi.date().iso().required().custom(isAge60OrOver, 'Age Validation'),        id_type: Joi.alternatives().try(
+            Joi.string().valid('居民身份证', '港澳台居民居住证'),
+            Joi.array().items(Joi.string().valid('居民身份证', '港澳台居民居住证')).single()
+          ).required(),
+        id_number: Joi.string().when('id_type', {
         switch: [
           { 
             is: '居民身份证', 
@@ -63,6 +90,11 @@ module.exports = function(dbPool) {
     }
     
     const {
+      name,
+      gender,
+      phone_number,
+      address,  
+      birthday,
       id_type,
       id_number,
       id_front_photo_url,
@@ -76,44 +108,40 @@ module.exports = function(dbPool) {
       connection = await dbPool.getConnection();
       await connection.beginTransaction();
 
-      const [users] = await connection.query('SELECT name, gender, phone_number, address FROM users WHERE id = ?', [user_id]);
-            if (users.length === 0) {
-              return res.status(404).json({ success: false, message: '无法找到当前用户信息。' });
-            }
-            const userInfo = users[0];
+      const insertApplicationSQL = `
+        INSERT INTO application_info (user_id, name, gender, birthday, id_type, id_number, phone_number, address, id_front_photo_url, id_back_photo_url) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        `;
+        
+      const [applicationResult] = await connection.query(insertApplicationSQL, [
+        user_id,
+        name,
+        gender,
+        birthday,
+        phone_number,
+        address,
+        id_type,
+        id_number,
+        id_front_photo_url,
+        id_back_photo_url
+      ]);
+      const newApplicationId = applicationResult.insertId;
 
-            const insertApplicationSQL = `
-              INSERT INTO application_info (user_id, name, gender, id_type, id_number, phone_number, address, id_front_photo_url, id_back_photo_url) 
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-            `;
-            const [applicationResult] = await connection.query(insertApplicationSQL, [
-              user_id,
-              userInfo.name,
-              userInfo.gender,
-              id_type,
-              id_number,
-              userInfo.phone_number,
-              userInfo.address,
-              id_front_photo_url,
-              id_back_photo_url
-            ]);
-            const newApplicationId = applicationResult.insertId;
+      const insertLogSQL = `
+        INSERT INTO audit_log (application_id, user_id, action, remarks) 
+        VALUES (?, ?, ?, ?);
+      `;
 
-            const insertLogSQL = `
-              INSERT INTO audit_log (application_id, user_id, action, remarks) 
-              VALUES (?, ?, ?, ?);
-            `;
+      await connection.query(insertLogSQL, [newApplicationId, user_id, 'SUBMIT', '客户线上提交申请']);
+      await connection.commit();
 
-            await connection.query(insertLogSQL, [newApplicationId, user_id, 'SUBMIT', '客户线上提交申请']);
-            await connection.commit();
-
-            res.status(201).json({
-              success: true,
-              message: '申请提交成功！',
-              data: {
-                applicationId: newApplicationId
-              }
-            });
+      res.status(201).json({
+        success: true,
+        message: '申请提交成功！',
+        data: {
+          applicationId: newApplicationId
+        }
+      });
 
     } catch (dbError) {
       if (connection) {
@@ -267,6 +295,7 @@ module.exports = function(dbPool) {
     }
 
     const { application_id } = value;
+    const user_id = req.user.user_id;
     let connection;
 
     try {
@@ -325,33 +354,26 @@ module.exports = function(dbPool) {
         return res.status(400).json({ success: false, message: '没有提供文件用于上传。' });
       }
 
+      // 规范化文件名
       const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
-      const containerClient = blobServiceClient.getContainerClient(containerName);
-      
-      const blobName = `${Date.now()}-${req.file.originalname}`;
-      const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+      const fileExtension = path.extname(req.file.originalname); // 获取文件扩展名, e.g., '.png'
+      const userId = req.user.user_id; // 从 authenticate 中间件获取用户ID
+      const newBlobName = `user_${userId}_${Date.now()}${fileExtension}`; // 创建安全唯一的文件名
 
-      await blockBlobClient.uploadData(req.file.buffer, {
+      const containerClient = blobServiceClient.getContainerClient(containerName);
+      const blockBlobClient = containerClient.getBlockBlobClient(newBlobName); // 使用新文件名
+
+      // 使用 uploadData API
+      await blockBlobClient.upload(req.file.buffer, req.file.buffer.length, {
         blobHTTPHeaders: { blobContentType: req.file.mimetype }
       });
 
-      const sasOptions = {
-        containerName: containerName,
-        blobName: blobName,
-        startsOn: new Date(),
-        expiresOn: new Date(new Date().valueOf() + 3600 * 1000),
-        permissions: BlobSASPermissions.parse("r"),
-        protocol: SASProtocol.Https
-      };
-
-      const sasToken = generateBlobSASQueryParameters(sasOptions, blobServiceClient.credential).toString();
-      const sasUrl = `${blockBlobClient.url}?${sasToken}`;
-
+      // 返回永久的、公开的URL
       res.status(200).json({
         success: true,
         message: '文件上传成功！',
         data: {
-          url: sasUrl 
+          url: blockBlobClient.url, 
         }
       });
 

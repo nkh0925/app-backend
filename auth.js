@@ -13,6 +13,7 @@ module.exports = function(dbPool) {
     const registerSchema = Joi.object({
       name: Joi.string().min(2).max(50).required(),
       gender: Joi.string().valid('男', '女').required(),
+      birthday: Joi.date().required(),
       address: Joi.string().min(5).max(255).required(),
       phone_number: Joi.string().pattern(/^1[3-9]\d{9}$/).required().messages({
         'string.pattern.base': '无效的手机号码格式。'
@@ -27,7 +28,7 @@ module.exports = function(dbPool) {
       return res.status(400).json({ success: false, message: `输入数据无效: ${error.details[0].message}` });
     }
 
-    const { name, gender, address, phone_number, password } = value;
+    const { name, gender, birthday, address, phone_number, password } = value;
     let connection;
 
     try {
@@ -41,10 +42,10 @@ module.exports = function(dbPool) {
       const hashedPassword = await bcrypt.hash(password, 10);
 
       const insertUserSQL = `
-        INSERT INTO users (name, gender, address, phone_number, password, role)
-        VALUES (?, ?, ?, ?, ?, 'customer');
+        INSERT INTO users (name, gender, birthday, address, phone_number, password, role)
+        VALUES (?, ?, ?, ?, ?,?, 'customer');
       `;
-      const [result] = await connection.query(insertUserSQL, [name, gender, address, phone_number, hashedPassword]);
+      const [result] = await connection.query(insertUserSQL, [name, gender,birthday, address, phone_number, hashedPassword]);
       
       res.status(201).json({
         success: true,
@@ -123,7 +124,7 @@ module.exports = function(dbPool) {
     try {
       connection = await dbPool.getConnection();
       const [users] = await connection.query(
-        'SELECT id, name, gender, address, phone_number, role FROM users WHERE id = ?',
+        'SELECT id, name, gender, birthday, address, phone_number, role FROM users WHERE id = ?',
         [user_id]
       );
       

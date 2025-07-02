@@ -1,11 +1,16 @@
 const express = require('express');
+const morgan = require('morgan');
 const mysql = require('mysql2/promise'); 
 const compression = require('compression');
+const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
 app.use(compression());
 app.use(express.json());
+app.use(cors());
+
+app.use(morgan(':method :url :status :response-time ms'));
 
 // 创建数据库连接池
 const dbPool = mysql.createPool({
