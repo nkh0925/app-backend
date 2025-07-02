@@ -1,8 +1,10 @@
 const express = require('express');
 const mysql = require('mysql2/promise'); 
+const compression = require('compression');
 require('dotenv').config();
 
 const app = express();
+app.use(compression());
 app.use(express.json());
 
 // 创建数据库连接池
