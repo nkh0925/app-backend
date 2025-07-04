@@ -30,10 +30,10 @@ module.exports = function(dbPool) {
         }
 
         if (age < 60) {
-            // 如果年龄小于60，返回一个自定义的错误信息
+            // 如果年龄小于60，返回错误信息
             return helpers.message('不符合安心卡申领条件：申请人必须年满60周岁');
         }
-        return value; // 校验通过
+        return value; 
     };
 
     //定义数据校验规则
@@ -60,7 +60,7 @@ module.exports = function(dbPool) {
           },
           { 
             is: '港澳台居民居住证', 
-            then: Joi.string().pattern(/^8[123]0000(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dX]$/).required().messages({
+            then: Joi.string().pattern(/^8[123]0000(18|19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{3}[\dX]$/).required().messages({
               'string.pattern.base': '无效的港澳台居民居住证号码格式。'
             })
           }
@@ -70,7 +70,6 @@ module.exports = function(dbPool) {
       id_back_photo_url: Joi.string().uri().required(),
     });
 
-    // 使用 Joi 进行数据校验
     const { error, value } = applicationSchema.validate(req.body);
     if (error) {
       console.error("完整校验错误详情：", error.details);
@@ -179,7 +178,8 @@ module.exports = function(dbPool) {
       // 只允许用户查询自己的申请记录
       const findApplicationSQL = `
         SELECT id, name, gender, birthday, phone_number, address, id_type, id_number, 
-        id_front_photo_url, id_back_photo_url, status, comments, created_at, updated_at         FROM application_info 
+        id_front_photo_url, id_back_photo_url, status, comments, created_at, updated_at         
+        FROM application_info 
         WHERE user_id = ?
         ORDER BY id DESC;
       `;
@@ -203,14 +203,14 @@ module.exports = function(dbPool) {
     }
   });
 
-// 修改申请接口
+// 修改重提接口
 router.post('/application/update', async (req, res) => {
     const updateSchema = Joi.object({
         application_id: Joi.number().integer().required(),
         name: Joi.string().optional(),
         gender: Joi.string().valid('男', '女').optional(),
         birthday: Joi.date().iso().optional(),
-        phone_number: Joi.string().pattern(/^[1-9]\d{10}$/).optional().messages({
+        phone_number: Joi.string().pattern(/^[1-9]\d{10}$/).required().messages({
             'string.pattern.base': '无效的手机号码格式。',
         }),
         address: Joi.string().optional(),
@@ -261,7 +261,13 @@ router.post('/application/update', async (req, res) => {
         await connection.beginTransaction();
 
         // 验证申请状态
-        const [apps] = await connection.query('SELECT user_id, status FROM application_info WHERE id = ? FOR UPDATE', [application_id]);;
+        const [apps] = await connection.query(
+            `SELECT user_id, status, name, gender, birthday, phone_number, 
+                    address, id_type, id_number, id_front_photo_url, id_back_photo_url 
+             FROM application_info 
+             WHERE id = ? FOR UPDATE`, 
+            [application_id]
+        );
         if (apps.length === 0) {
             await connection.rollback();
             return res.status(404).json({ success: false, message: '申请记录不存在。' });
@@ -275,16 +281,54 @@ router.post('/application/update', async (req, res) => {
             return res.status(403).json({ success: false, message: `操作被拒绝：只有被驳回的申请才能修改，当前状态为 "${apps[0].status}"。` });
         }
 
-        // 将状态重新置为'PENDING'，并清除旧的驳回意见
-        updateData.status = 'PENDING';
-        updateData.comments = null;
-        updateData.updated_at = new Date();
+        // 构建有效修改字段
+        const modifiedFields = {};
+        const originalData = apps[0];
+        
+        // 通用字段对比
+        const fieldMapping = {
+            name: 'name',
+            gender: 'gender',
+            birthday: (v) => formatDate(v) === formatDate(originalData.birthday),
+            phone_number: 'phone_number',
+            address: 'address',
+            id_type: 'id_type',
+            id_number: 'id_number',
+            id_front_photo_url: 'id_front_photo_url',
+            id_back_photo_url: 'id_back_photo_url'
+        };
 
-        // 动态构建SQL语句，只更新传入的字段
-        const updateFields = Object.keys(updateData).map(key => `${key} = ?`).join(', ');
-        const updateValues = Object.values(updateData);
+        for (const [key, compareFn] of Object.entries(fieldMapping)) {
+            if (updateData[key] !== undefined) {
+                if (typeof compareFn === 'function') {
+                    if (!compareFn(updateData[key])) {
+                        modifiedFields[key] = updateData[key];
+                    }
+                } else if (updateData[key] !== originalData[compareFn]) {
+                    modifiedFields[key] = updateData[key];
+                }
+            }
+        }
+
+        // 检测是否有实际修改
+        if (Object.keys(modifiedFields).length === 0) {
+            await connection.rollback();
+            return res.status(400).json({ 
+                success: false, 
+                message: '未检测到任何有效修改，请修改后重新提交' 
+            });
+        }
+
+        // 只更新修改过的字段
+        modifiedFields.status = 'PENDING';
+        modifiedFields.comments = null;
+        modifiedFields.updated_at = new Date();
+
+        // 构建动态更新SQL
+        const updateFields = Object.keys(modifiedFields).map(key => `${key} = ?`).join(', ');
+        const updateValues = Object.values(modifiedFields);
+        
         const updateSQL = `UPDATE application_info SET ${updateFields} WHERE id = ?`;
-
         await connection.query(updateSQL, [...updateValues, application_id]);
 
         // 记录操作日志
@@ -294,7 +338,7 @@ router.post('/application/update', async (req, res) => {
         await connection.commit();
         res.status(200).json({
             success: true,
-            message: '申请已成功修改并重新提交审核。'
+            message: '申请已成功修改并重新提交。'
         });
 
     } catch (dbError) {
@@ -306,7 +350,7 @@ router.post('/application/update', async (req, res) => {
     }
 });
 
-//   取消申请接口
+//  取消申请接口
   router.post('/application/cancel', async (req, res) => {
     //校验请求体中的 application_id
     const cancelSchema = Joi.object({
@@ -333,7 +377,7 @@ router.post('/application/update', async (req, res) => {
       connection = await dbPool.getConnection();
       await connection.beginTransaction();
 
-      // 查询申请并加锁
+      // 查询申请
         const [apps] = await connection.query('SELECT user_id, status FROM application_info WHERE id = ? FOR UPDATE', [application_id]);
         if (apps.length === 0) {
             await connection.rollback();
@@ -351,11 +395,11 @@ router.post('/application/update', async (req, res) => {
         }
 
         // 确保只有待处理的申请才能被取消
-        if (apps[0].status !== 'PENDING') {
+        if (!['PENDING', 'REJECTED'].includes(apps[0].status) ) {
             await connection.rollback();
             return res.status(403).json({ 
               success: false, 
-              message: `操作被拒绝：只有待处理的申请才能取消，当前状态为 "${apps[0].status}"。` });
+              message: `操作被拒绝：只有待处理或被驳回的申请才能取消，当前状态为 "${apps[0].status}"。` });
         }
 
         // 执行更新

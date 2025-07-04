@@ -4,7 +4,7 @@ const Joi = require('joi');
 const { authenticate, authorize } = require('./authMiddleware');
 module.exports = function(dbPool) {
 
-  // 对所有审核接口，要求先登录(authenticate)，然后检查角色(authorize)
+  // 对所有审核接口，要求先登录，然后检查角色
   router.use(authenticate);
   router.use(authorize(['auditor', 'admin']));
 
